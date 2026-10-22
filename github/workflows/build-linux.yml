@@ -1,1 +1,35 @@
+name: Build Linux (Zorin / Ubuntu)
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Prepare icon (512x512)
+        run: |
+          if [ -f icon.png ]; then
+            convert icon.png -resize 512x512 -background none -gravity center -extent 512x512 icon.png
+          else
+            convert -size 512x512 xc:'#103820' icon.png
+          fi
+
+      - run: npm install
+
+      - run: npm run dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: massar-linux
+          path: |
+            dist/*.deb
+            dist/*.AppImage
