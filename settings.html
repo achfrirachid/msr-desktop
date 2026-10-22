@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+body{font-family:system-ui,sans-serif;margin:0;padding:18px;background:#f4f6f4}
+label{display:block;margin:12px 0 4px;font-weight:600}
+input,select{width:100%;box-sizing:border-box;padding:8px;font-size:15px;border:1px solid #bbb;border-radius:6px}
+small{color:#666}
+.row{display:flex;gap:10px;margin-top:18px}
+button{flex:1;padding:10px;font-size:15px;border:0;border-radius:6px;cursor:pointer}
+#save{background:#1b6b3a;color:#fff}
+#msg{margin-top:10px;min-height:1.2em}
+</style></head><body>
+<label>معرف الدخول (Identifiant)</label><input id="login" placeholder="193464@TAALIM.MA" dir="ltr">
+<label>باسورد مسار (دخول تلقائي)</label><input id="massarPw" type="password" dir="ltr"><small id="pwHint"></small>
+<label>سر التحقق (TOTP, Base32)</label><input id="totp" type="password" dir="ltr"><small id="totpHint"></small>
+<label>الضغط التلقائي على بطاقة بعد الدخول</label>
+<select id="card"><option value="off">بدون</option><option value="lead">القيادة والتدبير الإداري</option><option value="tam">التمدرس</option><option value="fin">التدبير المالي والمادي</option></select>
+<label>رابط الموقع (اتركه خاوي للافتراضي)</label><input id="url" dir="ltr">
+<label>تغيير باسورد التطبيق (اختياري)</label><input id="newAppPw" type="password">
+<div id="msg"></div>
+<div class="row"><button id="save">حفظ</button><button id="close">إغلاق</button></div>
+<script>
+const $ = (id) => document.getElementById(id);
+(async () => {
+  const s = await api.getSettings(); if (!s) return;
+  $('login').value = s.login; $('card').value = s.card; $('url').value = s.url; $('url').placeholder = s.defaultUrl;
+  $('pwHint').textContent = s.hasPw ? 'محفوظ (خليه خاوي إلا ما بغيتيش تبدلو)' : '';
+  $('totpHint').textContent = s.hasTotp ? 'محفوظ (خليه خاوي إلا ما بغيتيش تبدلو)' : '';
+})();
+$('save').onclick = async () => {
+  const r = await api.saveSettings({ login: $('login').value, massarPw: $('massarPw').value, totp: $('totp').value,
+    card: $('card').value, url: $('url').value, newAppPw: $('newAppPw').value });
+  $('msg').textContent = r.ok ? 'تحفظ ✔' : (r.error || 'وقع خطأ');
+  if (r.ok) { $('massarPw').value = ''; $('totp').value = ''; $('newAppPw').value = ''; setTimeout(() => api.closeSettings(), 700); }
+};
+$('close').onclick = () => api.closeSettings();
+</script></body></html>

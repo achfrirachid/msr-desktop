@@ -1,0 +1,28 @@
+{
+  "name": "massar-desktop",
+  "productName": "Massar",
+  "version": "1.0.0",
+  "description": "Massar desktop wrapper (Linux)",
+  "author": "Massar Desktop <noreply@example.com>",
+  "license": "UNLICENSED",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --linux deb AppImage --publish never"
+  },
+  "devDependencies": {
+    "electron": "31.7.7",
+    "electron-builder": "24.13.3"
+  },
+  "build": {
+    "appId": "ma.gov.men.massar.desktop",
+    "productName": "Massar",
+    "files": ["main.js", "preload.js", "inject.js", "totp.js", "lock.html", "settings.html", "icon.png"],
+    "linux": {
+      "target": ["deb", "AppImage"],
+      "category": "Education",
+      "icon": "icon.png",
+      "maintainer": "Massar Desktop <noreply@example.com>"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+html,body{height:100%;margin:0;background:#103820;color:#fff;font-family:system-ui,sans-serif}
+.box{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
+input{font-size:22px;text-align:center;width:260px;padding:8px;border-radius:6px;border:0}
+button{font-size:16px;padding:8px 28px;border-radius:6px;border:0;cursor:pointer}
+#err{color:#ff8a80;min-height:1.2em}
+</style></head><body>
+<div class="box">
+  <div id="title" style="font-size:20px">...</div>
+  <input id="pw" type="password" placeholder="الباسورد" autofocus>
+  <input id="pw2" type="password" placeholder="عاود الباسورد" style="display:none">
+  <div id="err"></div>
+  <button id="go">دخول</button>
+</div>
+<script>
+let setup = false;
+const $ = (id) => document.getElementById(id);
+async function init() {
+  setup = (await api.lockState()).setup;
+  $('title').textContent = setup ? 'أول تشغيل: دير باسورد للتطبيق' : 'أدخل الباسورد لفتح التطبيق';
+  $('pw2').style.display = setup ? '' : 'none';
+  $('go').textContent = setup ? 'حفظ' : 'دخول';
+}
+async function submit() {
+  $('err').textContent = '';
+  const pw = $('pw').value;
+  if (setup) {
+    if (pw.length < 4) { $('err').textContent = 'الباسورد قصير (4 على الأقل)'; return; }
+    if (pw !== $('pw2').value) { $('err').textContent = 'الباسوردين ما متطابقينش'; return; }
+    await api.setup(pw);
+  } else {
+    $('go').disabled = true;
+    const r = await api.unlock(pw);
+    $('go').disabled = false;
+    if (!r.ok) { $('err').textContent = 'باسورد خاطئ'; $('pw').value = ''; }
+  }
+}
+$('go').onclick = submit;
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+init();
+</script></body></html>
