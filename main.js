@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, session, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain, Menu, safeStorage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -7,8 +7,6 @@ const crypto = require('crypto');
 const START_URL = 'https://massar.men.gov.ma';
 const LOCK_CODES = ['v'];                          // كود الحماية
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000;            // 5 دقائق فالخلفية بلا استعمال = القفل
-const LOGIN_ID = '193464@TAALIM.MA';
-const MASSAR_PASSWORD = 'Achfri@1982.';   // الباسورد ديال مسار
 const TOTP_SECRET = '4RO2NWBPUAPF3CMEGWKZKHQP6MI67SIM';
 const SESSION_DAYS = 3650;                        // مدة بقاء الدخول محفوظ
 const PARTITION = 'persist:massar';
@@ -74,47 +72,118 @@ function keepSessionCookies(ses) {
   });
 }
 
-// ====== تعبئة كود MFA تلقائيا ======
+// ====== حفظ الباسورد (يُحفظ مرة واحدة بعد أول دخول ناجح يدوي) ======
+const CRED_FILE = () => path.join(app.getPath('userData'), 'creds.json');
+let pending = null;          // آخر باسورد كتبتيه يدويا (ما تحفظش حتى يتأكد الدخول)
+let autoSubmittedAt = 0;     // وقت آخر دخول تلقائي
+let autoTried = 0;           // محاولة تلقائية وحدة فقط فكل تشغيل
+let mfaTried = 0;
+let mfaCodeSeenAt = 0;       // أول مرة بانت فيها خانة الكود (باش نتسناو قبل التعبئة)
+let mfaLastAttemptAt = 0;    // وقت آخر محاولة تعبئة/إرسال للكود
+let blockedUntil = 0;        // إلى كاين حظر، ما نحاولوش قبل هاد الوقت
+const MFA_MIN_WAIT_MS = 10000;   // تسناو 10 ثواني من بعد ما تبان الخانة قبل أول محاولة
+const MFA_RETRY_GAP_MS = 15000;  // ما بين محاولة ومحاولة
+const BLOCK_COOLDOWN_MS = 13 * 60 * 1000; // إلا تبلوكا، نتسناو 13 دقيقة قبل ما نعاودو
+
+function saveCreds(d) {
+  try {
+    const enc = safeStorage.isEncryptionAvailable();
+    const p = enc ? safeStorage.encryptString(d.p).toString('base64') : Buffer.from(d.p, 'utf8').toString('base64');
+    fs.writeFileSync(CRED_FILE(), JSON.stringify({ u: d.u || '', p, enc }), { mode: 0o600 });
+  } catch (e) {}
+}
+function loadCreds() {
+  try {
+    const d = JSON.parse(fs.readFileSync(CRED_FILE(), 'utf8'));
+    const buf = Buffer.from(d.p, 'base64');
+    const p = d.enc ? safeStorage.decryptString(buf) : buf.toString('utf8');
+    return p ? { u: d.u, p } : null;
+  } catch (e) { return null; }
+}
+function deleteCreds() { try { fs.unlinkSync(CRED_FILE()); } catch (e) {} }
+ipcMain.on('pw-captured', (_e, d) => { if (d && d.p) pending = { u: String(d.u || ''), p: String(d.p) }; });
+
+// ====== دخول تلقائي + تعبئة كود MFA ======
 function autoFillMfa(contents) {
-  const run = () => {
+  const run = async (source) => {
     const url = contents.getURL();
-    if (!/mfa/i.test(url)) {
-      if (!/men\.gov\.ma|taalim\.ma/i.test(url)) return;
-      if (loginAttempts >= 3) return;   // حماية: ما يعاودش بزاف إلى كان الباسورد غالط
-      contents.executeJavaScript(`(function(){
+    if (!/men\.gov\.ma|taalim\.ma/i.test(url)) return;
+    const st = await contents.executeJavaScript(`(function(){
+      var t=(document.body&&document.body.innerText)||'';
+      return { pw: !!document.querySelector('input[type="password"]'),
+        code: !!document.querySelector('input[name="Code"],input#Code,input[autocomplete="one-time-code"]') || /mfa/i.test(location.href),
+        blocked: /bloqu|Trop de tentatives|محظور/i.test(t) };
+    })()`).catch(() => null);
+    if (!st) return;
+
+    // تأكيد حفظ الباسورد: إلا ما بقاش حقل الباسورد = الدخول نجح
+    if (pending && !st.pw && !st.blocked) { saveCreds(pending); pending = null; }
+    if (pending && st.pw && source === 'load') pending = null;
+
+    // الموقع بلوكا الحساب: نوقفو تماما لمدة، ما نعاودوش نحاولو حتى يفوت الوقت
+    if (st.blocked) {
+      if (!blockedUntil) blockedUntil = Date.now() + BLOCK_COOLDOWN_MS;
+      return;
+    }
+    if (blockedUntil && Date.now() < blockedUntil) return; // مازال فالتسنية
+    blockedUntil = 0;
+
+    // الباسورد المحفوظ فشل: نحيدوه ونوقفو (باش ما يتبلوكاش الحساب)
+    if (st.pw && autoSubmittedAt && Date.now() - autoSubmittedAt > 5000) { deleteCreds(); autoSubmittedAt = 0; return; }
+    if (!st.pw) autoSubmittedAt = 0;
+    if (!st.code) mfaCodeSeenAt = 0; // خانة الكود ماشي حاضرة، رجّع العداد
+
+    if (st.pw && !st.code) {
+      if (autoTried >= 1) return;
+      const c = loadCreds();
+      if (!c) return;                       // ما كاين والو محفوظ: دخل الباسورد بيدك أول مرة
+      const sent = await contents.executeJavaScript(`(function(){
         var pw = document.querySelector('input[type="password"]');
         if(!pw || window.__loginSent) return false;
         var form = pw.form || document;
         var user = form.querySelector('input[type="text"],input[type="email"],input:not([type])');
-        if(!user) return false;
         var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-        function put(el,v){ setter.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }
-        put(user,'${LOGIN_ID}');
-        put(pw,'${MASSAR_PASSWORD}');
+        function put(el,v){ el.focus(); setter.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }
+        if(user && ${JSON.stringify(c.u)} && !user.value) put(user, ${JSON.stringify(c.u)});
+        put(pw, ${JSON.stringify(c.p)});
+        if(pw.value !== ${JSON.stringify(c.p)}) return false;
         var b = (pw.form && pw.form.querySelector('button[type="submit"],input[type="submit"],button:not([type])')) || document.querySelector('button[type="submit"],input[type="submit"]');
         if(b){ window.__loginSent = true; setTimeout(function(){ b.click(); }, 800); return true; }
         return false;
-      })();`).then(sent => { if (sent) loginAttempts++; }).catch(() => {});
+      })();`).catch(() => false);
+      if (sent) { autoTried++; autoSubmittedAt = Date.now(); }
       return;
     }
-    const code = totp();
-    contents.executeJavaScript(`(function(){
-      var el = document.querySelector('input[name="Code"],input#Code,input[autocomplete="one-time-code"]')
-            || document.querySelector('input[type="text"],input[type="tel"],input[type="number"]');
-      if(!el || el.value === '${code}') return;
-      el.focus();
-      var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-      setter.call(el,'${code}');
-      el.dispatchEvent(new Event('input',{bubbles:true}));
-      el.dispatchEvent(new Event('change',{bubbles:true}));
-      var f = el.form;
-      var b = (f && f.querySelector('button[type="submit"],input[type="submit"],button:not([type])')) || document.querySelector('button[type="submit"],input[type="submit"]');
-      if(b && !window.__mfaSent){ window.__mfaSent = true; setTimeout(function(){ b.click(); }, 800); }
-    })();`).catch(() => {});
+
+    if (st.code) {
+      if (mfaTried >= 3) return;
+      if (!mfaCodeSeenAt) mfaCodeSeenAt = Date.now();
+      // تسناو 10 ثواني من أول ظهور للخانة، وعلى الأقل 15 ثانية بين محاولة ومحاولة
+      if (Date.now() - mfaCodeSeenAt < MFA_MIN_WAIT_MS) return;
+      if (mfaLastAttemptAt && Date.now() - mfaLastAttemptAt < MFA_RETRY_GAP_MS) return;
+      if (30 - (Math.floor(Date.now() / 1000) % 30) < 4) await new Promise(r => setTimeout(r, 4500));
+      mfaLastAttemptAt = Date.now();
+      const code = totp();
+      const ok = await contents.executeJavaScript(`(function(){
+        var el = document.querySelector('input[name="Code"],input#Code,input[autocomplete="one-time-code"]')
+              || document.querySelector('input[type="text"],input[type="tel"],input[type="number"]');
+        if(!el || window.__mfaSent) return false;
+        el.focus();
+        var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+        setter.call(el,'${code}');
+        el.dispatchEvent(new Event('input',{bubbles:true}));
+        el.dispatchEvent(new Event('change',{bubbles:true}));
+        var f = el.form;
+        var b = (f && f.querySelector('button[type="submit"],input[type="submit"],button:not([type])')) || document.querySelector('button[type="submit"],input[type="submit"]');
+        if(b){ window.__mfaSent = true; setTimeout(function(){ b.click(); }, 800); return true; }
+        return false;
+      })();`).catch(() => false);
+      if (ok) mfaTried++;
+    }
   };
-  contents.on('did-finish-load', run);
-  contents.on('did-navigate-in-page', run);
-  setInterval(run, 25000);
+  contents.on('did-finish-load', () => run('load'));
+  contents.on('did-navigate-in-page', () => run('nav'));
+  setInterval(() => run('tick'), 25000);
 }
 
 // ====== القفل ======
@@ -169,11 +238,13 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1280, height: 800, title: 'مسار', icon: path.join(__dirname, 'icon.png'),
     show: false,
-    webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false }
+    webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'login-capture.js') }
   });
   Menu.setApplicationMenu(null);
   win.loadURL(START_URL);
-  win.once('ready-to-show', () => { win.show(); resetIdle(); startIdleWatcher(); if (lockNeededAtStart()) showLock(); });
+  win.once('ready-to-show', () => { win.show(); resetIdle(); });
+  // ملاحظة: قفل التطبيق بالكود تحيد (startIdleWatcher ما كيتشغلش) باش التطبيق
+  // يتفتح تلقائيا بلا ما يطلب حتى حاجة، والدخول + كود الـMFA كيتعبيو وحدهم فالخلفية.
 
   // أي رابط جديد يتفتح في نفس النافذة (ما يخرجش للمتصفح)
   win.webContents.setWindowOpenHandler(({ url }) => { win.loadURL(url); return { action: 'deny' }; });

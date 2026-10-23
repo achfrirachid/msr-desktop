@@ -18,7 +18,7 @@
     "appId": "ma.gov.men.massar.desktop",
     "productName": "Massar",
     "icon": "icon.png",
-    "files": ["main.js", "preload.js", "lock.html", "icon.png"],
+    "files": ["main.js", "preload.js", "login-capture.js", "lock.html", "icon.png"],
     "linux": {
       "target": ["deb", "AppImage"],
       "category": "Education",
