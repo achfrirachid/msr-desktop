@@ -1,28 +1,28 @@
 {
   "name": "massar-desktop",
-  "productName": "Massar",
-  "version": "1.0.0",
-  "description": "Massar desktop wrapper (Linux)",
-  "author": "Massar Desktop <noreply@example.com>",
-  "license": "UNLICENSED",
+  "version": "1.1.0",
+  "description": "Massar desktop (Zorin / Ubuntu)",
   "main": "main.js",
+  "author": { "name": "Rachid Achfri", "email": "achfrirachid@gmail.com" },
+  "homepage": "https://github.com/achfrirachid",
+  "license": "UNLICENSED",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --linux deb AppImage --publish never"
+    "dist": "electron-builder --linux"
   },
   "devDependencies": {
-    "electron": "31.7.7",
-    "electron-builder": "24.13.3"
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
   },
   "build": {
     "appId": "ma.gov.men.massar.desktop",
     "productName": "Massar",
-    "files": ["main.js", "preload.js", "inject.js", "totp.js", "lock.html", "settings.html", "icon.png"],
+    "icon": "icon.png",
+    "files": ["main.js", "preload.js", "lock.html", "icon.png"],
     "linux": {
       "target": ["deb", "AppImage"],
       "category": "Education",
-      "icon": "icon.png",
-      "maintainer": "Massar Desktop <noreply@example.com>"
+      "maintainer": "Rachid Achfri <achfrirachid@gmail.com>"
     }
   }
 }

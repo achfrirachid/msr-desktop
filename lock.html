@@ -1,44 +1,35 @@
-<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
 <style>
-html,body{height:100%;margin:0;background:#103820;color:#fff;font-family:system-ui,sans-serif}
-.box{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
-input{font-size:22px;text-align:center;width:260px;padding:8px;border-radius:6px;border:0}
-button{font-size:16px;padding:8px 28px;border-radius:6px;border:0;cursor:pointer}
-#err{color:#ff8a80;min-height:1.2em}
-</style></head><body>
-<div class="box">
-  <div id="title" style="font-size:20px">...</div>
-  <input id="pw" type="password" placeholder="الباسورد" autofocus>
-  <input id="pw2" type="password" placeholder="عاود الباسورد" style="display:none">
+  html,body{margin:0;height:100%;background:rgba(32,72,50,0.97);color:#fff;font-family:sans-serif;
+    display:flex;align-items:center;justify-content:center;text-align:center}
+  h2{font-weight:normal;font-size:26px;margin:0 0 28px}
+  input{width:320px;padding:10px;font-size:22px;background:transparent;color:#fff;border:0;
+    border-bottom:2px solid #0d2a1b;text-align:center;direction:ltr;outline:none}
+  input::placeholder{color:#b5c7bc}
+  button{margin-top:36px;padding:14px 48px;font-size:20px;border:0;border-radius:4px;background:#e0e0e0;color:#111;cursor:pointer}
+  #err{color:#ff9d9d;height:22px;margin-top:10px}
+</style>
+</head>
+<body>
+<div>
+  <h2>أدخل الباسورد لفتح التطبيق</h2>
+  <input id="code" type="password" placeholder="الباسورد" autofocus autocomplete="off">
+  <br><button id="go">دخول</button>
   <div id="err"></div>
-  <button id="go">دخول</button>
 </div>
 <script>
-let setup = false;
-const $ = (id) => document.getElementById(id);
-async function init() {
-  setup = (await api.lockState()).setup;
-  $('title').textContent = setup ? 'أول تشغيل: دير باسورد للتطبيق' : 'أدخل الباسورد لفتح التطبيق';
-  $('pw2').style.display = setup ? '' : 'none';
-  $('go').textContent = setup ? 'حفظ' : 'دخول';
-}
-async function submit() {
-  $('err').textContent = '';
-  const pw = $('pw').value;
-  if (setup) {
-    if (pw.length < 4) { $('err').textContent = 'الباسورد قصير (4 على الأقل)'; return; }
-    if (pw !== $('pw2').value) { $('err').textContent = 'الباسوردين ما متطابقينش'; return; }
-    await api.setup(pw);
-  } else {
-    $('go').disabled = true;
-    const r = await api.unlock(pw);
-    $('go').disabled = false;
-    if (!r.ok) { $('err').textContent = 'باسورد خاطئ'; $('pw').value = ''; }
+  const input = document.getElementById('code');
+  const err = document.getElementById('err');
+  async function go(){
+    const ok = await window.lockApi.unlock(input.value);
+    if(!ok){ err.textContent = 'الباسورد غير صحيح'; input.value=''; input.focus(); }
   }
-}
-$('go').onclick = submit;
-document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
-init();
-</script></body></html>
+  document.getElementById('go').addEventListener('click', go);
+  input.addEventListener('keydown', e => { if(e.key === 'Enter') go(); });
+  setTimeout(()=>input.focus(), 100);
+</script>
+</body>
+</html>
