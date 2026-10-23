@@ -12,7 +12,7 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --linux --publish never",
-    "seed": "node scripts/make-seed.js"
+    "seed": "node make-seed.js"
   },
   "devDependencies": {
     "electron": "^31.7.7",
