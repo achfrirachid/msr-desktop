@@ -257,19 +257,15 @@ function autoFillMfa(contents) {
 const LOCK_FILE = () => path.join(app.getPath('userData'), 'lock.json');
 let failCount = 0;
 let lockedOutUntil = 0;
-function hasPin() { try { return fs.existsSync(LOCK_FILE()); } catch (e) { return false; } }
+let lockLevel = 0;
+const LOCK_PIN = 'v';   // كود القفل الثابت (حرف واحد) — بدّلو هنا إلا بغيتي
+function hasPin() { return true; }
 function validPin(p) { return /^[a-z0-9]{1,20}$/.test(p); }
-function savePin(pin) {
-  const salt = crypto.randomBytes(16);
-  const h = crypto.scryptSync(pin, salt, 32);
-  fs.writeFileSync(LOCK_FILE(), JSON.stringify({ s: salt.toString('base64'), h: h.toString('base64') }), { mode: 0o600 });
-}
+function savePin() {}
 function checkPin(pin) {
-  try {
-    const j = JSON.parse(fs.readFileSync(LOCK_FILE(), 'utf8'));
-    const h = crypto.scryptSync(pin, Buffer.from(j.s, 'base64'), 32);
-    return crypto.timingSafeEqual(h, Buffer.from(j.h, 'base64'));
-  } catch (e) { return false; }
+  const a = crypto.createHash('sha256').update(String(pin)).digest();
+  const b = crypto.createHash('sha256').update(LOCK_PIN).digest();
+  return crypto.timingSafeEqual(a, b);
 }
 
 function resetIdle() { lastActive = Date.now(); }
@@ -320,11 +316,11 @@ ipcMain.handle('unlock', (_e, code) => {
   const wait = lockedOutUntil - Date.now();
   if (wait > 0) return { ok: false, wait };
   if (checkPin(String(code || '').trim().toLowerCase())) {
-    failCount = 0; unlocked = true; hideLock(); resetIdle();
+    failCount = 0; lockLevel = 0; unlocked = true; hideLock(); resetIdle();
     return { ok: true, wait: 0 };
   }
   failCount++;
-  if (failCount >= 5) { lockedOutUntil = Date.now() + Math.min(60000 * (failCount - 4), 600000); }
+  if (failCount >= 5) { lockLevel++; failCount = 0; lockedOutUntil = Date.now() + Math.min(60000 * lockLevel, 300000); }
   return { ok: false, wait: Math.max(0, lockedOutUntil - Date.now()) };
 });
 ipcMain.on('quit-app', () => app.quit());
