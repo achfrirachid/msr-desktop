@@ -105,7 +105,9 @@ function base32Decode(s) {
   for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
   return Buffer.from(bytes);
 }
-let timeOffset = 0;   // فرق الساعة بين الحاسوب وسيرفر مسار (ms)
+let timeOffset = 0;
+let clockSynced = false;
+let syncFailLogged = false;   // فرق الساعة بين الحاسوب وسيرفر مسار (ms)
 function nowMs() { return Date.now() + timeOffset; }
 function syncClock() {
   try {
@@ -114,11 +116,11 @@ function syncClock() {
       const d = res.headers && res.headers['date'];
       const t = d ? Date.parse(Array.isArray(d) ? d[0] : d) : NaN;
       if (!isNaN(t)) {
-        timeOffset = t - Date.now();
+        timeOffset = t - Date.now(); clockSynced = true;
         mfaLog('clock drift vs server: ' + Math.round(timeOffset / 1000) + 's (auto-corrected)');
       }
     });
-    r.on('error', () => mfaLog('clock sync failed'));
+    r.on('error', (e) => mfaLog('clock sync failed: ' + (e && e.message)));
     r.end();
   } catch (e) {}
 }
@@ -215,6 +217,18 @@ async function mfaStep(contents) {
     if (mfaTried >= 2) { if (!mfaLoggedMax) { mfaLoggedMax = true; mfaLog('stopped: 2 attempts used'); } return; }
     if (mfaLastAttemptAt && Date.now() - mfaLastAttemptAt < MFA_RETRY_GAP_MS) return;
     if (30 - (Math.floor(nowMs() / 1000) % 30) < 4) return; // نتسناو الكود الجديد
+    if (!clockSynced) {
+      // نجيبو الوقت الحقيقي من سيرفر مسار نفسو (من داخل الصفحة)
+      const d = await contents.executeJavaScript(`fetch(location.href,{method:'HEAD',cache:'no-store'}).then(function(r){return r.headers.get('date');}).catch(function(){return null;})`).catch(() => null);
+      const t = d ? Date.parse(d) : NaN;
+      if (!isNaN(t)) {
+        timeOffset = t - Date.now(); clockSynced = true;
+        mfaLog('clock drift vs server (page): ' + Math.round(timeOffset / 1000) + 's (auto-corrected)');
+      } else {
+        if (!syncFailLogged) { syncFailLogged = true; mfaLog('cannot read server time; not attempting (to protect the account)'); }
+        return;
+      }
+    }
     const code = totp();
     if (!code) { mfaLog('no TOTP secret loaded'); return; }
     mfaLastAttemptAt = Date.now();
