@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, session, ipcMain, Menu, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain, Menu, safeStorage, powerMonitor, net } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -105,9 +105,26 @@ function base32Decode(s) {
   for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
   return Buffer.from(bytes);
 }
+let timeOffset = 0;   // فرق الساعة بين الحاسوب وسيرفر مسار (ms)
+function nowMs() { return Date.now() + timeOffset; }
+function syncClock() {
+  try {
+    const r = net.request({ method: 'HEAD', url: START_URL });
+    r.on('response', (res) => {
+      const d = res.headers && res.headers['date'];
+      const t = d ? Date.parse(Array.isArray(d) ? d[0] : d) : NaN;
+      if (!isNaN(t)) {
+        timeOffset = t - Date.now();
+        mfaLog('clock drift vs server: ' + Math.round(timeOffset / 1000) + 's (auto-corrected)');
+      }
+    });
+    r.on('error', () => mfaLog('clock sync failed'));
+    r.end();
+  } catch (e) {}
+}
 function totp() {
   if (!TOTP_SECRET) return null;
-  const counter = Math.floor(Date.now() / 30000);
+  const counter = Math.floor(nowMs() / 30000);
   const buf = Buffer.alloc(8);
   buf.writeBigUInt64BE(BigInt(counter));
   const h = crypto.createHmac('sha1', base32Decode(TOTP_SECRET)).update(buf).digest();
@@ -168,6 +185,67 @@ function loadCreds() {
 function deleteCreds() { try { fs.unlinkSync(CRED_FILE()); } catch (e) {} }
 ipcMain.on('pw-captured', (_e, d) => { if (d && d.p) pending = { u: String(d.u || ''), p: String(d.p) }; });
 
+// ====== تعبئة كود MFA (6 أرقام) تلقائيا — حلقة سريعة مستقلة ======
+const MFA_LOG = () => path.join(app.getPath('userData'), 'mfa-log.txt');
+function mfaLog(m) { try { fs.appendFileSync(MFA_LOG(), new Date().toISOString() + ' ' + m + '\n'); } catch (e) {} }
+let mfaBusy = false;
+let mfaLoggedMax = false;
+async function mfaStep(contents) {
+  if (mfaBusy) return;
+  mfaBusy = true;
+  try {
+    if (!contents || contents.isDestroyed()) return;
+    if (!/men\.gov\.ma|taalim\.ma/i.test(contents.getURL())) return;
+    if (blockedUntil && Date.now() < blockedUntil) return;
+    const found = await contents.executeJavaScript(`(function(){
+      if (document.querySelector('input[type="password"]')) return false;
+      var t=(document.body&&document.body.innerText)||'';
+      var mfaPage = /mfa/i.test(location.href) || /deux étapes|two-step|Authenticator|Vérification MFA/i.test(t);
+      var els = document.querySelectorAll('input[name="Code"],input#Code,input[autocomplete="one-time-code"],input[name*="code" i],input[id*="code" i],input[placeholder*="code" i],input[name*="otp" i]');
+      for (var i=0;i<els.length;i++){ var e=els[i]; if (e.type!=='hidden' && e.type!=='password' && e.offsetParent!==null && (mfaPage || e.name==='Code' || e.id==='Code')) return true; }
+      return false;
+    })()`).catch(() => false);
+    if (!found) {
+      mfaCodeSeenAt = 0;
+      if (mfaTried > 0 && mfaLastAttemptAt && Date.now() - mfaLastAttemptAt > 60000) mfaTried = 0;
+      return;
+    }
+    if (!mfaCodeSeenAt) { mfaCodeSeenAt = Date.now(); mfaLog('MFA field detected'); }
+    if (Date.now() - mfaCodeSeenAt < 3000) return;
+    if (mfaTried >= 2) { if (!mfaLoggedMax) { mfaLoggedMax = true; mfaLog('stopped: 2 attempts used'); } return; }
+    if (mfaLastAttemptAt && Date.now() - mfaLastAttemptAt < MFA_RETRY_GAP_MS) return;
+    if (30 - (Math.floor(nowMs() / 1000) % 30) < 4) return; // نتسناو الكود الجديد
+    const code = totp();
+    if (!code) { mfaLog('no TOTP secret loaded'); return; }
+    mfaLastAttemptAt = Date.now();
+    mfaTried++;
+    const res = await contents.executeJavaScript(`(function(){
+      var els = document.querySelectorAll('input[name="Code"],input#Code,input[autocomplete="one-time-code"],input[name*="code" i],input[id*="code" i],input[placeholder*="code" i],input[name*="otp" i]');
+      var el=null; for (var i=0;i<els.length;i++){ if(els[i].type!=='hidden'&&els[i].type!=='password'&&els[i].offsetParent!==null){ el=els[i]; break; } }
+      if(!el) return 'no-input';
+      el.focus(); el.select();
+      try { document.execCommand('insertText', false, '${code}'); } catch(e) {}
+      if (el.value !== '${code}') {
+        var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+        setter.call(el,'${code}');
+        el.dispatchEvent(new Event('input',{bubbles:true}));
+        el.dispatchEvent(new Event('change',{bubbles:true}));
+      }
+      var kept = (el.value === '${code}');
+      var f = el.form;
+      var b = (f && f.querySelector('button[type="submit"],input[type="submit"],button:not([type])')) || document.querySelector('button[type="submit"],input[type="submit"]');
+      if(!b){ var all=document.querySelectorAll('button,input[type="button"],a'); for(var j=0;j<all.length;j++){ var tx=(all[j].innerText||all[j].value||''); if(/valider|vérifier|verifier|submit|confirmer/i.test(tx)){ b=all[j]; break; } } }
+      setTimeout(function(){
+        if(b) b.click();
+        else if(f && f.requestSubmit) f.requestSubmit();
+        else el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      }, 700);
+      return (b ? 'filled+click' : 'filled+submit') + (kept ? ' value-ok' : ' VALUE-NOT-KEPT');
+    })()`).catch((e) => 'error:' + (e && e.message));
+    mfaLog('attempt ' + mfaTried + ' code=' + code + ' : ' + res);
+  } finally { mfaBusy = false; }
+}
+
 // ====== دخول تلقائي + تعبئة كود MFA ======
 function autoFillMfa(contents) {
   const run = async (source) => {
@@ -220,36 +298,11 @@ function autoFillMfa(contents) {
       return;
     }
 
-    if (st.code) {
-      if (mfaTried >= 3) return;
-      if (!mfaCodeSeenAt) mfaCodeSeenAt = Date.now();
-      // تسناو 10 ثواني من أول ظهور للخانة، وعلى الأقل 15 ثانية بين محاولة ومحاولة
-      if (Date.now() - mfaCodeSeenAt < MFA_MIN_WAIT_MS) return;
-      if (mfaLastAttemptAt && Date.now() - mfaLastAttemptAt < MFA_RETRY_GAP_MS) return;
-      if (30 - (Math.floor(Date.now() / 1000) % 30) < 4) await new Promise(r => setTimeout(r, 4500));
-      mfaLastAttemptAt = Date.now();
-      const code = totp();
-      if (!code) return;
-      const ok = await contents.executeJavaScript(`(function(){
-        var el = document.querySelector('input[name="Code"],input#Code,input[autocomplete="one-time-code"]')
-              || document.querySelector('input[type="text"],input[type="tel"],input[type="number"]');
-        if(!el || window.__mfaSent) return false;
-        el.focus();
-        var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-        setter.call(el,'${code}');
-        el.dispatchEvent(new Event('input',{bubbles:true}));
-        el.dispatchEvent(new Event('change',{bubbles:true}));
-        var f = el.form;
-        var b = (f && f.querySelector('button[type="submit"],input[type="submit"],button:not([type])')) || document.querySelector('button[type="submit"],input[type="submit"]');
-        if(b){ window.__mfaSent = true; setTimeout(function(){ b.click(); }, 800); return true; }
-        return false;
-      })();`).catch(() => false);
-      if (ok) mfaTried++;
-    }
   };
   contents.on('did-finish-load', () => run('load'));
   contents.on('did-navigate-in-page', () => run('nav'));
   setInterval(() => run('tick'), 25000);
+  setInterval(() => mfaStep(contents), 1500);
 }
 
 // ====== القفل بكود الحماية (PIN) ======
@@ -358,6 +411,8 @@ app.whenReady().then(async () => {
     if (!TOTP_SECRET) return app.quit();
     saveSecret(TOTP_SECRET);
   }
+  mfaLog('app started; secret loaded: ' + !!TOTP_SECRET);
+  syncClock();
   createWindow();
 });
 app.on('before-quit', () => {
