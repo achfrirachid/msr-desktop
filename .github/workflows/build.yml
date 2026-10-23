@@ -15,7 +15,7 @@ jobs:
       - name: Embed secret at build time (from GitHub Secret)
         env:
           TOTP_SECRET: ${{ secrets.TOTP_SECRET }}
-        run: node scripts/make-seed.js
+        run: node make-seed.js
       - run: npm run dist
       - uses: actions/upload-artifact@v4
         with:
