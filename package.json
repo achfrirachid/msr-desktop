@@ -3,12 +3,16 @@
   "version": "1.1.0",
   "description": "Massar desktop (Zorin / Ubuntu)",
   "main": "main.js",
-  "author": { "name": "Rachid Achfri", "email": "achfrirachid@gmail.com" },
+  "author": {
+    "name": "Rachid Achfri",
+    "email": "achfrirachid@gmail.com"
+  },
   "homepage": "https://github.com/achfrirachid",
   "license": "UNLICENSED",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --linux --publish never"
+    "dist": "electron-builder --linux --publish never",
+    "seed": "node scripts/make-seed.js"
   },
   "devDependencies": {
     "electron": "^31.7.7",
@@ -18,9 +22,19 @@
     "appId": "ma.gov.men.massar.desktop",
     "productName": "Massar",
     "icon": "icon.png",
-    "files": ["main.js", "preload.js", "login-capture.js", "lock.html", "icon.png"],
+    "files": [
+      "main.js",
+      "preload.js",
+      "login-capture.js",
+      "lock.html",
+      "icon.png",
+      "seed.bin"
+    ],
     "linux": {
-      "target": ["deb", "AppImage"],
+      "target": [
+        "deb",
+        "AppImage"
+      ],
       "category": "Education",
       "maintainer": "Rachid Achfri <achfrirachid@gmail.com>"
     }

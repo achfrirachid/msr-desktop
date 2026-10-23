@@ -5,9 +5,9 @@ const crypto = require('crypto');
 
 // ====== الإعدادات ======
 const START_URL = 'https://massar.men.gov.ma';
-const LOCK_CODES = ['v'];                          // كود الحماية
+const LOCK_CODES = [];                             // القفل موقوف؛ ما تكتبش كود هنا إلا بغيتي ترجعو (ما يتحطش فالريبو)
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000;            // 5 دقائق فالخلفية بلا استعمال = القفل
-const TOTP_SECRET = '4RO2NWBPUAPF3CMEGWKZKHQP6MI67SIM';
+let TOTP_SECRET = null;                            // كيتحمل مشفر من جهازك، ما كاينش فالكود
 const SESSION_DAYS = 3650;                        // مدة بقاء الدخول محفوظ
 const PARTITION = 'persist:massar';
 
@@ -29,6 +29,71 @@ function lockNeededAtStart() {
 }
 let unlocked = false;
 
+
+// ====== المفتاح السري ديال TOTP: مخزن مشفر فجهازك فقط (ماشي فالكود ولا فالريبو) ======
+const SECRET_FILE = () => path.join(app.getPath('userData'), 'totp.bin');
+function normalizeSecret(v) {
+  const t = String(v || '').replace(/[\s-]/g, '').replace(/=+$/, '').toUpperCase();
+  return /^[A-Z2-7]{16,}$/.test(t) ? t : null;
+}
+function saveSecret(sec) {
+  try {
+    const enc = safeStorage.isEncryptionAvailable();
+    const data = enc ? safeStorage.encryptString(sec) : Buffer.from(sec, 'utf8');
+    fs.writeFileSync(SECRET_FILE(), JSON.stringify({ enc, d: data.toString('base64') }), { mode: 0o600 });
+  } catch (e) {}
+}
+function loadSecret() {
+  try {
+    const j = JSON.parse(fs.readFileSync(SECRET_FILE(), 'utf8'));
+    const buf = Buffer.from(j.d, 'base64');
+    return normalizeSecret(j.enc ? safeStorage.decryptString(buf) : buf.toString('utf8'));
+  } catch (e) { return null; }
+}
+
+// المفتاح المدمج وقت البناء (من GitHub Secret) — ماشي مكتوب فالريبو
+function loadBundledSecret() {
+  try {
+    const b = Buffer.from(fs.readFileSync(path.join(__dirname, 'seed.bin'), 'utf8').trim(), 'base64');
+    const key = crypto.createHash('sha256').update('massar-seed-v1').digest();
+    const out = Buffer.alloc(b.length);
+    for (let i = 0; i < b.length; i++) out[i] = b[i] ^ key[i % key.length];
+    return normalizeSecret(out.toString('utf8'));
+  } catch (e) { return null; }
+}
+// أول تشغيل فقط: نافذة صغيرة تلصق فيها المفتاح مرة وحدة، ومن بعد كيتحفظ مشفر
+function askSecret() {
+  return new Promise((resolve) => {
+    const w = new BrowserWindow({
+      width: 520, height: 300, resizable: false, title: 'إعداد مسار', autoHideMenuBar: true,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
+    });
+    const html = `<!DOCTYPE html><html dir="rtl"><meta charset="utf-8"><body style="font-family:sans-serif;padding:24px;background:#204832;color:#fff">
+      <h3 style="margin-top:0">الصق المفتاح السري ديال Authenticator (مرة وحدة)</h3>
+      <input id="s" type="password" autocomplete="off" spellcheck="false" style="width:100%;padding:10px;font-size:18px;direction:ltr;box-sizing:border-box">
+      <div id="e" style="color:#ff9d9d;height:22px;margin-top:8px"></div>
+      <button id="b" style="padding:10px 36px;font-size:16px">حفظ</button>
+      <script>
+        const i=document.getElementById('s');
+        function go(){ window.__secret=i.value; }
+        document.getElementById('b').onclick=go;
+        i.addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+      </script></body></html>`;
+    w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; clearInterval(t); try { w.destroy(); } catch (e) {} resolve(v); };
+    const t = setInterval(async () => {
+      if (w.isDestroyed()) return finish(null);
+      const v = await w.webContents.executeJavaScript('(function(){var v=window.__secret;window.__secret=null;return v||null;})()').catch(() => null);
+      if (!v) return;
+      const n = normalizeSecret(v);
+      if (n) return finish(n);
+      w.webContents.executeJavaScript(`document.getElementById('e').textContent='المفتاح غير صحيح، عاود'; document.getElementById('s').value='';`).catch(() => {});
+    }, 400);
+    w.on('closed', () => finish(null));
+  });
+}
+
 // ====== TOTP (RFC 6238) ======
 function base32Decode(s) {
   const alpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -42,6 +107,7 @@ function base32Decode(s) {
   return Buffer.from(bytes);
 }
 function totp() {
+  if (!TOTP_SECRET) return null;
   const counter = Math.floor(Date.now() / 30000);
   const buf = Buffer.alloc(8);
   buf.writeBigUInt64BE(BigInt(counter));
@@ -164,6 +230,7 @@ function autoFillMfa(contents) {
       if (30 - (Math.floor(Date.now() / 1000) % 30) < 4) await new Promise(r => setTimeout(r, 4500));
       mfaLastAttemptAt = Date.now();
       const code = totp();
+      if (!code) return;
       const ok = await contents.executeJavaScript(`(function(){
         var el = document.querySelector('input[name="Code"],input#Code,input[autocomplete="one-time-code"]')
               || document.querySelector('input[type="text"],input[type="tel"],input[type="number"]');
@@ -256,7 +323,16 @@ function createWindow() {
   win.on('closed', () => { win = null; });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  TOTP_SECRET = loadBundledSecret() || loadSecret();
+  if (!TOTP_SECRET) {
+    // خيار بديل: متغير بيئة مرة وحدة (MASSAR_TOTP_SECRET)، وإلا نافذة الإعداد
+    TOTP_SECRET = normalizeSecret(process.env.MASSAR_TOTP_SECRET) || await askSecret();
+    if (!TOTP_SECRET) return app.quit();
+    saveSecret(TOTP_SECRET);
+  }
+  createWindow();
+});
 app.on('before-quit', () => {
   if (win && win.isFocused()) { lastActive = Date.now(); }
   saveLastActive();
