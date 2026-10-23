@@ -1,11 +1,10 @@
-const { app, BrowserWindow, WebContentsView, session, ipcMain, Menu, safeStorage } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain, Menu, safeStorage, powerMonitor } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 // ====== الإعدادات ======
 const START_URL = 'https://massar.men.gov.ma';
-const LOCK_CODES = [];                             // القفل موقوف؛ ما تكتبش كود هنا إلا بغيتي ترجعو (ما يتحطش فالريبو)
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000;            // 5 دقائق فالخلفية بلا استعمال = القفل
 let TOTP_SECRET = null;                            // كيتحمل مشفر من جهازك، ما كاينش فالكود
 const SESSION_DAYS = 3650;                        // مدة بقاء الدخول محفوظ
@@ -253,15 +252,39 @@ function autoFillMfa(contents) {
   setInterval(() => run('tick'), 25000);
 }
 
-// ====== القفل ======
+// ====== القفل بكود الحماية (PIN) ======
+// الكود كيتحدد أول مرة كيتفتح التطبيق، وكيتخزن مشفر (hash) فجهازك فقط — ماشي فالكود ولا فالريبو.
+const LOCK_FILE = () => path.join(app.getPath('userData'), 'lock.json');
+let failCount = 0;
+let lockedOutUntil = 0;
+function hasPin() { try { return fs.existsSync(LOCK_FILE()); } catch (e) { return false; } }
+function validPin(p) { return /^[a-z0-9]{1,20}$/.test(p); }
+function savePin(pin) {
+  const salt = crypto.randomBytes(16);
+  const h = crypto.scryptSync(pin, salt, 32);
+  fs.writeFileSync(LOCK_FILE(), JSON.stringify({ s: salt.toString('base64'), h: h.toString('base64') }), { mode: 0o600 });
+}
+function checkPin(pin) {
+  try {
+    const j = JSON.parse(fs.readFileSync(LOCK_FILE(), 'utf8'));
+    const h = crypto.scryptSync(pin, Buffer.from(j.s, 'base64'), 32);
+    return crypto.timingSafeEqual(h, Buffer.from(j.h, 'base64'));
+  } catch (e) { return false; }
+}
+
 function resetIdle() { lastActive = Date.now(); }
 function startIdleWatcher() {
   setInterval(() => {
     if (!win || lockWin) return;
-    // كاين الاستعمال: النافذة مفتوحة وقدامك
-    if (win.isFocused() && !win.isMinimized()) { lastActive = Date.now(); saveLastActive(); return; }
-    if (Date.now() - lastActive >= LOCK_TIMEOUT_MS) showLock();
+    const away = win.isMinimized() || !win.isVisible() || !win.isFocused();
+    const sysIdle = powerMonitor.getSystemIdleTime() * 1000;
+    if (!away && sysIdle < LOCK_TIMEOUT_MS) { lastActive = Date.now(); return; }
+    // التطبيق فالخلفية، ولا الحاسوب ما كيتستعملش 5 دقائق = القفل
+    if (away) { if (Date.now() - lastActive >= LOCK_TIMEOUT_MS) showLock(); }
+    else showLock();
   }, 5000);
+  powerMonitor.on('lock-screen', showLock);
+  powerMonitor.on('suspend', showLock);
 }
 function fitLock() {
   if (!win || !lockWin) return;
@@ -274,7 +297,6 @@ function showLock() {
   lockWin = new WebContentsView({
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
   });
-  lockWin.setBackgroundColor('#00000000');
   win.contentView.addChildView(lockWin);
   fitLock();
   lockWin.webContents.loadFile(path.join(__dirname, 'lock.html'));
@@ -286,14 +308,24 @@ function hideLock() {
   lockWin = null;
   if (win) win.webContents.focus();
 }
+ipcMain.handle('lock-state', () => ({ hasPin: hasPin(), wait: Math.max(0, lockedOutUntil - Date.now()) }));
+ipcMain.handle('set-pin', (_e, pin) => {
+  pin = String(pin || '').trim().toLowerCase();
+  if (hasPin() || !validPin(pin)) return false;
+  try { savePin(pin); } catch (e) { return false; }
+  unlocked = true; hideLock(); resetIdle();
+  return true;
+});
 ipcMain.handle('unlock', (_e, code) => {
-  if (LOCK_CODES.includes(String(code || '').trim())) {
-    unlocked = true;
-    hideLock();
-    resetIdle();
-    return true;
+  const wait = lockedOutUntil - Date.now();
+  if (wait > 0) return { ok: false, wait };
+  if (checkPin(String(code || '').trim().toLowerCase())) {
+    failCount = 0; unlocked = true; hideLock(); resetIdle();
+    return { ok: true, wait: 0 };
   }
-  return false;
+  failCount++;
+  if (failCount >= 5) { lockedOutUntil = Date.now() + Math.min(60000 * (failCount - 4), 600000); }
+  return { ok: false, wait: Math.max(0, lockedOutUntil - Date.now()) };
 });
 ipcMain.on('quit-app', () => app.quit());
 
@@ -309,9 +341,8 @@ function createWindow() {
   });
   Menu.setApplicationMenu(null);
   win.loadURL(START_URL);
-  win.once('ready-to-show', () => { win.show(); resetIdle(); });
-  // ملاحظة: قفل التطبيق بالكود تحيد (startIdleWatcher ما كيتشغلش) باش التطبيق
-  // يتفتح تلقائيا بلا ما يطلب حتى حاجة، والدخول + كود الـMFA كيتعبيو وحدهم فالخلفية.
+  win.once('ready-to-show', () => { win.show(); resetIdle(); showLock(); startIdleWatcher(); });
+  // القفل مفعل: كيتطلب الكود عند الفتح، وبعد 5 دقائق بلا استعمال/فالخلفية.
 
   // أي رابط جديد يتفتح في نفس النافذة (ما يخرجش للمتصفح)
   win.webContents.setWindowOpenHandler(({ url }) => { win.loadURL(url); return { action: 'deny' }; });
